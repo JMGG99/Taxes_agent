@@ -225,6 +225,7 @@ __pycache__/
 .venv/
 venv/
 TA_venv/
+claude.md
 
 # Environment
 .env

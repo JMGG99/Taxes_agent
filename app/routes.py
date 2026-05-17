@@ -1,81 +1,171 @@
-from fastapi import APIRouter, Depends, Query
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from app.database import get_db
+from app.limiter import limiter
 from app.models import TaxRecord, WithholdingBracket
+from app.schemas import EICCreditResponse, TaxRecordResponse, WithholdingBracketResponse
 
 router = APIRouter()
 
 
-@router.get("/tax-records")
+@router.get(
+    "/tax-records",
+    response_model=list[TaxRecordResponse],
+    summary="Federal income tax bracket lookup (p1040 · 2025)",
+)
+@limiter.limit("100/minute")
 async def get_tax_records(
-    year:           Optional[int] = Query(None, description="Tax year, e.g. 2024 or 2025"),
-    table_type:     Optional[str] = Query(None, description="'tax_table' or 'eic'"),
-    filing_status:  Optional[str] = Query(None, description="Filing status value"),
+    request: Request,
+    income: int = Query(
+        ...,
+        ge=0,
+        le=99999,
+        description="Taxpayer's taxable income in whole dollars (0 – 99,999).",
+    ),
+    filing_status: Literal[
+        "single",
+        "married_filing_jointly",
+        "married_filing_separately",
+        "head_of_household",
+    ] = Query(..., description="Filing status as reported on Form 1040."),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return tax bracket and EIC credit records.
-
-    Negative amount = tax owed (p1040).
-    Positive amount = EIC credit returned to taxpayer (p596).
     """
-    query = select(TaxRecord)
-    if year:
-        query = query.where(TaxRecord.year == year)
-    if table_type:
-        query = query.where(TaxRecord.table_type == table_type)
-    if filing_status:
-        query = query.where(TaxRecord.filing_status == filing_status)
+    Returns the **single tax bracket** that matches the taxpayer's income and filing status.
 
-    result = await db.execute(query)
-    records = result.scalars().all()
-
-    return [
-        {
-            "id":                   r.id,
-            "year":                 r.year,
-            "table_type":           r.table_type,
-            "filing_status":        r.filing_status,
-            "income_from":          r.income_from,
-            "income_to":            r.income_to,
-            "amount":               r.amount,
-            "qualifying_children":  r.qualifying_children,
-        }
-        for r in records
-    ]
+    - Source: IRS Publication 1040 · tax year **2025**
+    - `amount` is **negative** — it represents federal income tax owed to the IRS
+    - Income range: $0 – $99,999 (use the Tax Computation Worksheet for higher incomes)
+    """
+    result = await db.execute(
+        select(TaxRecord).where(
+            TaxRecord.year         == 2025,
+            TaxRecord.table_type   == "tax_table",
+            TaxRecord.filing_status == filing_status,
+            TaxRecord.income_from  <= income,
+            TaxRecord.income_to    >  income,
+        )
+    )
+    record = result.scalar_one_or_none()
+    return [record] if record else []
 
 
-@router.get("/withholding-brackets")
-async def get_withholding_brackets(
-    year:           Optional[int] = Query(None, description="Tax year, e.g. 2025 or 2026"),
-    pay_period:     Optional[str] = Query(None, description="WEEKLY | BIWEEKLY | SEMIMONTHLY | MONTHLY | DAILY"),
-    filing_status:  Optional[str] = Query(None, description="Filing status value"),
+@router.get(
+    "/eic-credits",
+    response_model=list[EICCreditResponse],
+    summary="Earned Income Credit lookup (p596 · 2024–2025)",
+)
+@limiter.limit("100/minute")
+async def get_eic_credits(
+    request: Request,
+    income: int = Query(
+        ...,
+        ge=1,
+        description="Taxpayer's earned income in whole dollars (must be at least $1).",
+    ),
+    filing_status: Literal[
+        "single_mfs_hh",
+        "married_filing_jointly",
+    ] = Query(
+        ...,
+        description=(
+            "**single_mfs_hh** → Single, Married Filing Separately, or Head of Household. "
+            "**married_filing_jointly** → Married filing a joint return."
+        ),
+    ),
+    qualifying_children: Literal["0", "1", "2", "3"] = Query(
+        ...,
+        description="Number of qualifying children with valid SSNs.",
+    ),
+    year: Literal["2024", "2025"] = Query(
+        ...,
+        description="Tax year. Use 2025 for current returns, 2024 for prior-year amendments.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return wage bracket withholding records from p15t (2020+ W-4 only)."""
-    query = select(WithholdingBracket)
-    if year:
-        query = query.where(WithholdingBracket.year == year)
-    if pay_period:
-        query = query.where(WithholdingBracket.pay_period == pay_period)
-    if filing_status:
-        query = query.where(WithholdingBracket.filing_status == filing_status)
+    """
+    Returns the **single EIC bracket** that matches the taxpayer's earned income profile.
 
-    result = await db.execute(query)
-    records = result.scalars().all()
+    - Source: IRS Publication 596
+    - `amount` is **positive** — it represents a refundable credit returned to the taxpayer
+    - EIC is a credit, not a tax — a higher amount means more money back
+    """
+    result = await db.execute(
+        select(TaxRecord).where(
+            TaxRecord.year                == int(year),
+            TaxRecord.table_type          == "eic",
+            TaxRecord.filing_status       == filing_status,
+            TaxRecord.qualifying_children == int(qualifying_children),
+            TaxRecord.income_from         <= income,
+            TaxRecord.income_to           >  income,
+        )
+    )
+    record = result.scalar_one_or_none()
+    return [record] if record else []
 
-    return [
-        {
-            "id":                   r.id,
-            "year":                 r.year,
-            "filing_status":        r.filing_status,
-            "pay_period":           r.pay_period,
-            "income_from":          float(r.income_from),
-            "income_to":            float(r.income_to),
-            "withholding_amount":   float(r.withholding_amount),
-            "withholding_type":     r.withholding_type,
-        }
-        for r in records
-    ]
+
+@router.get(
+    "/withholding-brackets",
+    response_model=list[WithholdingBracketResponse],
+    summary="Wage bracket withholding lookup (p15t · 2025–2026)",
+)
+@limiter.limit("100/minute")
+async def get_withholding_brackets(
+    request: Request,
+    income: float = Query(
+        ...,
+        ge=0,
+        description=(
+            "Employee's adjusted wage amount for the pay period, in dollars. "
+            "max_values: (DAILY, $400) · (WEEKLY, $1,925) · (BIWEEKLY, $3,875) · (SEMIMONTHLY, $4,185) · (MONTHLY, $8,395). "
+            "Returns [] if income exceeds the table — use the IRS percentage method (Pub. 15-T)."
+        ),
+    ),
+    filing_status: Literal[
+        "Married Filing Jointly",
+        "Head of Household",
+        "Single or Married Filing Separately",
+    ] = Query(..., description="Filing status as declared on the employee's W-4 (2020 or later)."),
+    pay_period: Literal[
+        "WEEKLY",
+        "BIWEEKLY",
+        "SEMIMONTHLY",
+        "MONTHLY",
+        "DAILY",
+    ] = Query(..., description="Payroll frequency used by the employer."),
+    withholding_type: Literal["standard", "checkbox"] = Query(
+        ...,
+        description=(
+            "**standard** → Step 2 checkbox on W-4 is NOT checked. "
+            "**checkbox** → Step 2 checkbox IS checked (employee has multiple jobs or spouse works)."
+        ),
+    ),
+    year: Literal["2025", "2026"] = Query(
+        ...,
+        description="Tax year of the withholding tables to use.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns the **single wage bracket** that determines how much federal income tax
+    the employer should withhold from the employee's paycheck.
+
+    - Source: IRS Publication 15-T · 2020 or Later W-4 format only
+    - `withholding_amount` is the tentative amount to withhold for this pay period
+    """
+    result = await db.execute(
+        select(WithholdingBracket).where(
+            WithholdingBracket.year             == int(year),
+            WithholdingBracket.filing_status    == filing_status,
+            WithholdingBracket.pay_period       == pay_period,
+            WithholdingBracket.withholding_type == withholding_type,
+            WithholdingBracket.income_from      <= income,
+            WithholdingBracket.income_to        >  income,
+        )
+    )
+    record = result.scalar_one_or_none()
+    return [record] if record else []
