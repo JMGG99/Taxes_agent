@@ -1,1 +1,9 @@
-# Defines the app and PostgreSQL services, networking, and volume configuration for local development.
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://julio:julio@host.docker.internal:5432/taxes_db
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
