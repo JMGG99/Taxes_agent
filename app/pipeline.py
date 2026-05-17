@@ -1,8 +1,25 @@
+import asyncio
 import re
-import pdfplumber
-import pandas as pd
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
-## extracting p1040 
+import pdfplumber
+
+# ── PDF sources ───────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent.parent
+
+PDF_SOURCES = [
+    {"path": str(BASE_DIR / "data/pdfs/p1040_2025.pdf"), "extractor": "p1040", "year": 2025},
+    {"path": str(BASE_DIR / "data/pdfs/p596_2024.pdf"),  "extractor": "p596",  "year": 2024},
+    {"path": str(BASE_DIR / "data/pdfs/p596_2025.pdf"),  "extractor": "p596",  "year": 2025},
+    {"path": str(BASE_DIR / "data/pdfs/p15t_2025.pdf"),  "extractor": "p15t",  "year": 2025},
+    {"path": str(BASE_DIR / "data/pdfs/p15t_2026.pdf"),  "extractor": "p15t",  "year": 2026},
+]
+
+
+# ── Extractors ────────────────────────────────────────────────────────────────
+
+## extracting p1040
 def extract_p1040(pdf_path: str) -> list[dict]:
     nums_re = re.compile(r'\d[\d,]*')
     valid_widths = {5, 10, 25, 50}
@@ -234,3 +251,99 @@ def extract_p15t(pdf_path: str) -> list[dict]:
                     })
 
     return results
+
+
+# ── Extraction task (runs in a separate process) ──────────────────────────────
+
+def _extract(source: dict) -> tuple[str, int, list[dict]]:
+    """Called by ProcessPoolExecutor in a worker process.
+    Returns (extractor_name, year, records) so the caller knows
+    which source produced each result regardless of completion order.
+    """
+    extractors = {
+        "p1040": extract_p1040,
+        "p596":  extract_p596,
+        "p15t":  extract_p15t,
+    }
+    records = extractors[source["extractor"]](source["path"])
+    return source["extractor"], source["year"], records
+
+
+# ── Normalization ─────────────────────────────────────────────────────────────
+
+def _normalize_tax_records(extractor: str, year: int, records: list[dict]):
+    from app.models import TaxRecord
+    orm_objects = []
+    for r in records:
+        if extractor == "p1040":
+            amount              = -r["tax_amount"]   # money owed → negative
+            qualifying_children = None
+            table_type          = "tax_table"
+        else:
+            amount              = r["credit_amount"]  # EIC credit → positive
+            qualifying_children = r["qualifying_children"]
+            table_type          = "eic"
+
+        orm_objects.append(TaxRecord(
+            year=year,
+            table_type=table_type,
+            filing_status=r["filing_status"],
+            income_from=r["income_from"],
+            income_to=r["income_to"],
+            amount=amount,
+            qualifying_children=qualifying_children,
+        ))
+    return orm_objects
+
+
+def _normalize_withholding(year: int, records: list[dict]):
+    from app.models import WithholdingBracket
+    return [
+        WithholdingBracket(
+            year=year,
+            filing_status=r["filing_status"],
+            pay_period=r["pay_period"],
+            income_from=r["income_from"],
+            income_to=r["income_to"],
+            withholding_amount=r["withholding_amount"],
+            withholding_type=r["raw_data"]["withholding_type"],
+        )
+        for r in records
+    ]
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+async def run_pipeline(session) -> dict:
+    """Extract all PDFs in parallel, normalize, and bulk-insert into PostgreSQL.
+
+    Idempotent: skips loading if tax_records already has rows.
+    Returns a summary dict with record counts per source.
+    """
+    from sqlalchemy import select
+    from app.models import TaxRecord
+
+    # 1. Skip if already loaded
+    existing = await session.scalar(select(TaxRecord).limit(1))
+    if existing is not None:
+        return {"status": "already_loaded"}
+
+    # 2. Extract all 5 PDFs in parallel
+    loop = asyncio.get_event_loop()
+    with ProcessPoolExecutor(max_workers=5) as pool:
+        futures = [loop.run_in_executor(pool, _extract, source) for source in PDF_SOURCES]
+        results = await asyncio.gather(*futures)
+
+    # 3. Normalize and 4. insert
+    summary = {}
+    for extractor, year, records in results:
+        key = f"{extractor}_{year}"
+        if extractor in ("p1040", "p596"):
+            orm_objects = _normalize_tax_records(extractor, year, records)
+        else:
+            orm_objects = _normalize_withholding(year, records)
+        session.add_all(orm_objects)
+        summary[key] = len(orm_objects)
+
+    await session.commit()
+    return {"status": "loaded", "records": summary}

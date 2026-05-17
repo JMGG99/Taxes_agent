@@ -1,1 +1,9 @@
-# Python dependencies: FastAPI, SQLAlchemy, asyncpg, PyMuPDF, pdfplumber, anthropic, pydantic-settings, uvicorn.
+asyncpg==0.31.0
+fastapi==0.136.1
+pdfplumber==0.11.9
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pydantic_core==2.46.4
+PyMuPDF==1.27.2.3
+SQLAlchemy==2.0.49
+uvicorn==0.47.0
