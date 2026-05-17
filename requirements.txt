@@ -1,0 +1,1 @@
+# Python dependencies: FastAPI, SQLAlchemy, asyncpg, PyMuPDF, pdfplumber, anthropic, pydantic-settings, uvicorn.

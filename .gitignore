@@ -216,3 +216,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+#This project
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+TA_venv/
+
+# Environment
+.env
+
+# Data - PDFs stay local, not in repo
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
