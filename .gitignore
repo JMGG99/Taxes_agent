@@ -230,8 +230,9 @@ claude.md
 # Environment
 .env
 
-# Data - PDFs stay local, not in repo
-data/
+# Data - source PDFs go to repo, exploration and discarded stay local
+data/discarded_pdf/
+data/exploration/
 
 # IDE
 .vscode/
