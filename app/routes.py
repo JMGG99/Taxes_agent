@@ -34,13 +34,6 @@ async def get_tax_records(
     ] = Query(..., description="Filing status as reported on Form 1040."),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns the **single tax bracket** that matches the taxpayer's income and filing status.
-
-    - Source: IRS Publication 1040 · tax year **2025**
-    - `amount` is **negative** — it represents federal income tax owed to the IRS
-    - Income range: $0 – $99,999 (use the Tax Computation Worksheet for higher incomes)
-    """
     result = await db.execute(
         select(TaxRecord).where(
             TaxRecord.year         == 2025,
@@ -87,13 +80,6 @@ async def get_eic_credits(
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns the **single EIC bracket** that matches the taxpayer's earned income profile.
-
-    - Source: IRS Publication 596
-    - `amount` is **positive** — it represents a refundable credit returned to the taxpayer
-    - EIC is a credit, not a tax — a higher amount means more money back
-    """
     result = await db.execute(
         select(TaxRecord).where(
             TaxRecord.year                == int(year),
@@ -150,13 +136,6 @@ async def get_withholding_brackets(
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns the **single wage bracket** that determines how much federal income tax
-    the employer should withhold from the employee's paycheck.
-
-    - Source: IRS Publication 15-T · 2020 or Later W-4 format only
-    - `withholding_amount` is the tentative amount to withhold for this pay period
-    """
     result = await db.execute(
         select(WithholdingBracket).where(
             WithholdingBracket.year             == int(year),

@@ -1,11 +1,10 @@
 import asyncio
 import re
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pdfplumber
 
-# ── PDF sources ───────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent.parent
 
 PDF_SOURCES = [
@@ -16,8 +15,6 @@ PDF_SOURCES = [
     {"path": str(BASE_DIR / "data/pdfs/p15t_2026.pdf"),  "extractor": "p15t",  "year": 2026},
 ]
 
-
-# ── Extractors ────────────────────────────────────────────────────────────────
 
 ## extracting p1040
 def extract_p1040(pdf_path: str) -> list[dict]:
@@ -253,13 +250,7 @@ def extract_p15t(pdf_path: str) -> list[dict]:
     return results
 
 
-# ── Extraction task (runs in a separate process) ──────────────────────────────
-
 def _extract(source: dict) -> tuple[str, int, list[dict]]:
-    """Called by ProcessPoolExecutor in a worker process.
-    Returns (extractor_name, year, records) so the caller knows
-    which source produced each result regardless of completion order.
-    """
     extractors = {
         "p1040": extract_p1040,
         "p596":  extract_p596,
@@ -268,8 +259,6 @@ def _extract(source: dict) -> tuple[str, int, list[dict]]:
     records = extractors[source["extractor"]](source["path"])
     return source["extractor"], source["year"], records
 
-
-# ── Normalization ─────────────────────────────────────────────────────────────
 
 def _normalize_tax_records(extractor: str, year: int, records: list[dict]):
     from app.models import TaxRecord
@@ -312,29 +301,19 @@ def _normalize_withholding(year: int, records: list[dict]):
     ]
 
 
-# ── Pipeline ──────────────────────────────────────────────────────────────────
-
 async def run_pipeline(session) -> dict:
-    """Extract all PDFs in parallel, normalize, and bulk-insert into PostgreSQL.
-
-    Idempotent: skips loading if tax_records already has rows.
-    Returns a summary dict with record counts per source.
-    """
     from sqlalchemy import select
     from app.models import TaxRecord
 
-    # 1. Skip if already loaded
     existing = await session.scalar(select(TaxRecord).limit(1))
     if existing is not None:
         return {"status": "already_loaded"}
 
-    # 2. Extract all 5 PDFs in parallel
-    loop = asyncio.get_event_loop()
-    with ProcessPoolExecutor(max_workers=5) as pool:
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = [loop.run_in_executor(pool, _extract, source) for source in PDF_SOURCES]
         results = await asyncio.gather(*futures)
 
-    # 3. Normalize and 4. insert
     summary = {}
     for extractor, year, records in results:
         key = f"{extractor}_{year}"
