@@ -1,19 +1,21 @@
+import asyncio
 from contextlib import asynccontextmanager
-
 from fastapi import Depends, FastAPI, Request
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.database import engine, Base, AsyncSessionLocal, get_db
 from app.limiter import limiter
-from app.models import TaxRecord, WithholdingBracket
-from app.pipeline import run_pipeline
+from app.db_models import TaxRecord, WithholdingBracket
+from app.data_pipeline import run_pipeline
+from app.agent_tools import setup_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_loop(asyncio.get_running_loop())
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -34,7 +36,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 from app.routes import router          # noqa: E402
+from app.agent_routes import router as agent_router  # noqa: E402
 app.include_router(router, tags=["tax queries"])
+app.include_router(agent_router, tags=["agent"])
 
 
 @app.get("/health", summary="Health check", tags=["info"])

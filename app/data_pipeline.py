@@ -261,7 +261,7 @@ def _extract(source: dict) -> tuple[str, int, list[dict]]:
 
 
 def _normalize_tax_records(extractor: str, year: int, records: list[dict]):
-    from app.models import TaxRecord
+    from app.db_models import TaxRecord
     orm_objects = []
     for r in records:
         if extractor == "p1040":
@@ -286,7 +286,7 @@ def _normalize_tax_records(extractor: str, year: int, records: list[dict]):
 
 
 def _normalize_withholding(year: int, records: list[dict]):
-    from app.models import WithholdingBracket
+    from app.db_models import WithholdingBracket
     return [
         WithholdingBracket(
             year=year,
@@ -303,7 +303,7 @@ def _normalize_withholding(year: int, records: list[dict]):
 
 async def run_pipeline(session) -> dict:
     from sqlalchemy import select
-    from app.models import TaxRecord
+    from app.db_models import TaxRecord
 
     existing = await session.scalar(select(TaxRecord).limit(1))
     if existing is not None:

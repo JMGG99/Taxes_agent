@@ -3,6 +3,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str
+    azure_ai_endpoint: str
+    azure_model_deployment: str
+    azure_ai_api_key: str
 
     model_config = {
         "env_file": ".env",

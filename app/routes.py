@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.limiter import limiter
-from app.models import TaxRecord, WithholdingBracket
-from app.schemas import EICCreditResponse, TaxRecordResponse, WithholdingBracketResponse
+from app.db_models import TaxRecord, WithholdingBracket
+from app.db_response_schemas import EICCreditResponse, TaxRecordResponse, WithholdingBracketResponse
 
 router = APIRouter()
 
