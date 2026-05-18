@@ -38,7 +38,7 @@ Stores both tax table (p1040) and EIC credit tables (p596) rows under a single t
 | `id` | `INTEGER` | Primary Key |
 | `year` | `SMALLINT` | Tax year |
 | `table_type` | `VARCHAR(20)` | `tax_table` or `eic` |
-| `filing_status` | `VARCHAR(50)` | Person filing status |
+| `filing_status` | `VARCHAR(50)` | Taxpayer's filing status |
 | `income_from` | `INTEGER` | Inclusive lower bound |
 | `income_to` | `INTEGER` | Exclusive upper bound |
 | `amount` | `INTEGER` | Negative for tax owed, positive for EIC credit |
