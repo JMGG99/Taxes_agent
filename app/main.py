@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="IRS Tax Tables API",
     description="Structured tax data extracted from IRS publications.",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 app.state.limiter = limiter

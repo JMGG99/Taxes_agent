@@ -15,17 +15,20 @@ def setup_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 
 async def _run_sql_query(query: str) -> dict:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(text(query))
-        rows = result.mappings().fetchmany(MAX_ROWS)
-        records = [dict(row) for row in rows]
-        response = {"results": records, "count": len(records)}
-        if len(records) >= MAX_ROWS:
-            response["note"] = (
-                f"Results limited to {MAX_ROWS} rows. "
-                "For complete IRS data visit https://www.irs.gov/publications"
-            )
-        return response
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text(query))
+            rows = result.mappings().fetchmany(MAX_ROWS)
+            records = [dict(row) for row in rows]
+            response = {"results": records, "count": len(records)}
+            if len(records) >= MAX_ROWS:
+                response["note"] = (
+                    f"Results limited to {MAX_ROWS} rows. "
+                    "For complete IRS data visit https://www.irs.gov/publications"
+                )
+            return response
+    except Exception as e:
+        return {"error": f"SQL error: {str(e)}"}
 
 
 def run_sql_query(query: str) -> str:

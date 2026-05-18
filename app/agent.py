@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 from openai import OpenAI, pydantic_function_tool
 from pydantic import BaseModel, Field
@@ -99,11 +98,12 @@ def _run_sync(question: str) -> str:
         {"role": "user", "content": question},
     ]
 
-    while True:
+    for _ in range(10):
         response = client.chat.completions.create(
             model=settings.azure_model_deployment,
             messages=messages,
             tools=TOOLS,
+            timeout=60,
         )
 
         message = response.choices[0].message
@@ -120,6 +120,8 @@ def _run_sync(question: str) -> str:
                 "tool_call_id": tool_call.id,
                 "content": result,
             })
+
+    return "The request could not be completed. Please try again."
 
 
 async def run_agent(question: str) -> str:

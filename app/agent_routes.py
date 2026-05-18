@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.agent import run_agent
@@ -18,5 +18,8 @@ class AgentResponse(BaseModel):
 @router.post("/agent", response_model=AgentResponse, summary="Ask the tax assistant a question")
 @limiter.limit("20/minute")
 async def ask_agent(request: Request, body: AgentRequest):
-    answer = await run_agent(body.question)
-    return AgentResponse(answer=answer)
+    try:
+        answer = await run_agent(body.question)
+        return AgentResponse(answer=answer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
