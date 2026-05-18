@@ -35,7 +35,7 @@ Stores both tax table (p1040) and EIC credit tables (p596) rows under a single t
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | `INTEGER` | Id value |
+| `id` | `INTEGER` | Primary Key |
 | `year` | `SMALLINT` | Tax year |
 | `table_type` | `VARCHAR(20)` | `tax_table` or `eic` |
 | `filing_status` | `VARCHAR(50)` | Person filing status |
@@ -49,7 +49,7 @@ Stores p15t wage bracket rows.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | `INTEGER` | PK |
+| `id` | `INTEGER` | Primary Key |
 | `year` | `SMALLINT` | Tax year |
 | `filing_status` | `VARCHAR(50)` | W-4 filing status |
 | `pay_period` | `VARCHAR(20)` | `WEEKLY`, `BIWEEKLY`, `SEMIMONTHLY`, `MONTHLY`, `DAILY` |
