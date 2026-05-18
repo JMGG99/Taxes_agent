@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str
+    database_url_readonly: str
     azure_ai_endpoint: str
     azure_model_deployment: str
     azure_ai_api_key: str

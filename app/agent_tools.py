@@ -3,7 +3,7 @@ import json
 
 from sqlalchemy import text
 
-from app.database import AsyncSessionLocal
+from app.database import ReadonlySessionLocal
 
 MAX_ROWS = 50
 _main_loop: asyncio.AbstractEventLoop | None = None
@@ -16,7 +16,7 @@ def setup_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 async def _run_sql_query(query: str) -> dict:
     try:
-        async with AsyncSessionLocal() as session:
+        async with ReadonlySessionLocal() as session:
             result = await session.execute(text(query))
             rows = result.mappings().fetchmany(MAX_ROWS)
             records = [dict(row) for row in rows]
