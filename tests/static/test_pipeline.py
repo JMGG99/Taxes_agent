@@ -4,7 +4,7 @@ import pytest
 
 from app.data_pipeline import extract_p1040, extract_p596, extract_p15t
 
-BASE = Path(__file__).parent.parent
+BASE = Path(__file__).parent.parent.parent
 
 VALID_PAY_PERIODS = {"WEEKLY", "BIWEEKLY", "SEMIMONTHLY", "MONTHLY", "DAILY"}
 VALID_P15T_STATUSES = {

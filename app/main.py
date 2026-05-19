@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import engine, Base, AsyncSessionLocal, get_db
 from app.limiter import limiter
 from app.db_models import TaxRecord, WithholdingBracket
+from app.dynamic_pdf.models import DynamicPdfRecord  # noqa: F401 — registers model with Base
 from app.data_pipeline import run_pipeline
 from app.agent_tools import setup_loop
 
@@ -37,8 +38,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 from app.routes import router          # noqa: E402
 from app.agent_routes import router as agent_router  # noqa: E402
-app.include_router(router, tags=["tax queries"])
-app.include_router(agent_router, tags=["agent"])
+from app.dynamic_pdf.dynamic_pdf_routes import router as dynamic_router  # noqa: E402
+app.include_router(router, tags=["Static PDFs — IRS Documents · tax queries"])
+app.include_router(agent_router, tags=["Static PDFs — IRS Documents · agent"])
+app.include_router(dynamic_router, tags=["Dynamic Documents · pdf extraction"])
 
 
 @app.get("/health", summary="Health check", tags=["info"])

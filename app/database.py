@@ -18,3 +18,8 @@ class Base(DeclarativeBase):
 async def get_db() -> AsyncSession:
     async with ReadonlySessionLocal() as session:
         yield session
+
+
+async def get_write_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
