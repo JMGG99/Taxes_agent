@@ -1,24 +1,66 @@
 # IRS Tax Tables API
 
-REST API that extracts structured tax data from IRS (Internal Revenue Service) PDF publications and exposes it through queryable endpoints. Includes a natural language agent endpoint that translates questions into SQL queries against the same data.
+REST API that extracts structured tax data from PDF documents and exposes it through queryable endpoints. Supports two extraction pipelines: an AI-powered dynamic pipeline for any PDF document, and a deterministic static pipeline tuned for IRS publications. Includes a natural language agent endpoint backed by SQL queries.
+
+See [C4 Architecture Diagram](docs/c4_diagram.md) for the full system architecture.
+
+## Dual extraction architecture
+
+**AI-powered dynamic pipeline**
+Upload random Taxes PDF documents and extract structured records automatically — the system infers table schemas, field names, and data types without any prior knowledge of the document's structure.
+
+**Deterministic static pipeline**
+Layout-specific parsers purpose-built for IRS publications, delivering exact and fully auditable tax figures at zero inference cost per request.
 
 ## Quick overview
 
-- 3 GET endpoints for direct tax lookups: income tax brackets, Earned Income Credits, and wage withholding amounts
+- 4 endpoints for AI-powered dynamic PDF extraction — upload any PDF, the system infers schemas and extracts records automatically (max 5 documents)
+- 3 GET endpoints for direct IRS tax lookups: income tax brackets, Earned Income Credits, and wage withholding amounts
 - 1 POST endpoint for natural language tax questions answered by an AI agent via SQL queries
 - 39,422 records extracted from 5 IRS PDFs across 3 publications (p1040, p596, p15t)
 - Interactive API docs available at `/docs`
 
 ## Stack
 
-- **Python 3.12** / **FastAPI** — Async-native framework.
+- **Python 3.12** / **FastAPI** — Async-native framework
 - **SQLAlchemy 2 (async)** + **asyncpg** — Async PostgreSQL
 - **pdfplumber** — PDF text and table extraction
-- **OpenAI SDK** (Azure AI Foundry endpoint) — Agent tool calling
-- **slowapi** — Rate limiting for API
+- **OpenAI SDK** (Azure AI Foundry endpoint) — LLM extraction and agent tool calling
+- **python-multipart** — Multipart file upload support
+- **slowapi** — Rate limiting
 - **pytest** + **pytest-asyncio** — Tests
 
-## Data sources
+---
+
+## Dynamic PDF extraction (AI pipeline)
+
+Accepts any PDF containing tabular data and extracts structured records without requiring prior knowledge of the document's schema.
+
+### Flow
+
+1. **Deduplication** — SHA-256 hash of the file is computed before any processing. If the same PDF was already uploaded (regardless of filename), it is rejected immediately without spending tokens. The system holds a maximum of 5 documents.
+
+2. **Page filtering** — `pdfplumber` scans the document and selects only pages where `extract_tables()` detects structured content.
+
+3. **Parallel per-page extraction** — Each selected page is sent independently to `gpt-4o-mini` using 5 concurrent workers (`ThreadPoolExecutor`). The LLM receives the full page text — surrounding context (titles, headings, section names) plus the raw table rows — and returns a `table_type` name inferred from that context and a list of extracted records as JSON. `temperature=0` and `response_format=json_object` are used to minimize non-determinism.
+
+4. **Name reconciliation** — After all pages are processed, a single LLM call receives the list of all detected `table_type` names and normalizes them, merging names that refer to the same table across different pages.
+
+5. **Storage** — Each record is persisted in PostgreSQL as JSONB with its `pdf_hash`, `filename`, `page_number`, and `table_type`. No predefined schema is required.
+
+### Design note
+
+The per-page approach keeps each LLM call small (max 3,000 characters) and independent. Pages are processed in parallel, reducing total extraction time to approximately the slowest single page. Name reconciliation happens once at the end, after all parallel work is done, to ensure consistent grouping without blocking the parallel phase.
+
+Using the full page context — not just column structure — to name tables allows the LLM to distinguish tables that share the same columns but represent different entities (e.g., "Single Filers" vs "Married Filing Jointly" brackets on separate pages).
+
+---
+
+## Static PDF extraction (deterministic pipeline)
+
+Extracts IRS tax data at startup using layout-specific parsers per publication. Records are stored once and served through the GET endpoints.
+
+### Data sources
 
 | File | Content | Years | Source |
 |------|---------|-------|--------|
@@ -28,14 +70,44 @@ REST API that extracts structured tax data from IRS (Internal Revenue Service) P
 | `p15t_2025.pdf` | Wage withholding brackets | 2025 | [IRS Publication 15-T (2025)](https://www.irs.gov/pub/irs-prior/p15t--2025.pdf) |
 | `p15t_2026.pdf` | Wage withholding brackets | 2026 | [IRS Publication 15-T](https://www.irs.gov/pub/irs-pdf/p15t.pdf) |
 
+### Extraction strategy
+
+**p1040** — The tax table is rendered as plain text across 12 pages in a three-column layout. Each line contains up to three income bands packed together (e.g., `3,000 3,050 303 303 303 303  6,000 6,050 603 ...`). The extractor uses regex to find numeric sequences and a sliding window to identify valid income bands by checking that the bracket width is in `{5, 10, 25, 50}` and that bounds are multiples of 5. A `seen_bands` set prevents duplicates from the overlapping multi-column layout.
+
+**p596** — The EIC table has a proper table structure that pdfplumber's `extract_tables()` can parse directly. Each row contains an income range in column 0, single/MFS/HH credit amounts for 0–3 children in column 2, and MFJ credits in column 3. Some cells pack multiple rows with newlines, which are split and processed individually.
+
+**p15t** — The wage bracket tables are plain text pages identified by the header `Wage Bracket Method Tables` + `2020 or Later`. Each data line has exactly 8 space-separated tokens mapping to a fixed column order defined in `S2_COLUMNS`.
+
+All five PDFs are parsed in parallel using `ThreadPoolExecutor(max_workers=5)`. The pipeline is idempotent: on startup it checks for existing records before running.
+
+### Design note
+
+Tax amounts must be exact — a parsing error of $1 produces a wrong tax figure. The IRS PDFs contain embedded text (not scanned images), making the layout fully machine-readable. Deterministic parsing is testable, auditable, and adds no latency or cost per request. LLM-based extraction was used during development to identify table patterns and accelerate extraction logic design; the final implementation is fully rule-based.
+
+---
+
 ## Database schema
 
-### `tax_records`
-Stores both tax table (p1040) and EIC credit tables (p596) rows under a single table, differentiated by `table_type`.
+### `dynamic_pdf_records`
+Stores records extracted from dynamically uploaded PDFs. Schema is flexible — `record` holds arbitrary JSONB per document type.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | `INTEGER` | Primary Key |
+| `id` | `INTEGER` | Primary key |
+| `pdf_hash` | `VARCHAR(64)` | SHA-256 of the file — indexed, used for deduplication and lookup |
+| `filename` | `VARCHAR(255)` | Original filename |
+| `document_type` | `VARCHAR(255)` | Filename without extension |
+| `page_number` | `INTEGER` | Source page in the PDF |
+| `table_type` | `VARCHAR(100)` | LLM-inferred table name (e.g. `federal_income_tax_brackets_single_filers_2026`) |
+| `record` | `JSONB` | Extracted row — field names and types inferred per document |
+| `uploaded_at` | `TIMESTAMPTZ` | Upload timestamp |
+
+### `tax_records`
+Stores both tax table (p1040) and EIC credit tables (p596) rows, differentiated by `table_type`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `INTEGER` | Primary key |
 | `year` | `SMALLINT` | Tax year |
 | `table_type` | `VARCHAR(20)` | `tax_table` or `eic` |
 | `filing_status` | `VARCHAR(50)` | Taxpayer's filing status |
@@ -49,7 +121,7 @@ Stores p15t wage bracket rows.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | `INTEGER` | Primary Key |
+| `id` | `INTEGER` | Primary key |
 | `year` | `SMALLINT` | Tax year |
 | `filing_status` | `VARCHAR(50)` | W-4 filing status |
 | `pay_period` | `VARCHAR(20)` | `WEEKLY`, `BIWEEKLY`, `SEMIMONTHLY`, `MONTHLY`, `DAILY` |
@@ -58,62 +130,34 @@ Stores p15t wage bracket rows.
 | `withholding_amount` | `NUMERIC(10,2)` | Amount to withhold |
 | `withholding_type` | `VARCHAR(10)` | `standard` or `checkbox` |
 
-**Record counts (production DB):**
+**Static record counts (production DB):**
 
 | Source | Rows |
 |--------|------|
-| tax_table 2025 | 8,248 (2,062 × 4 filing statuses) |
-| eic 2024 | 10,696 (5,348 × 2 filing statuses) |
-| eic 2025 | 10,992 (5,496 × 2 filing statuses) |
-| withholding 2025 | 4,692 (3 filing statuses × 5 pay periods × 2 withholding types) |
+| tax_table 2025 | 8,248 |
+| eic 2024 | 10,696 |
+| eic 2025 | 10,992 |
+| withholding 2025 | 4,692 |
 | withholding 2026 | 4,794 |
 | **Total** | **39,422** |
 
-## PDF extraction
-
-The three IRS publications have different layouts, so each uses a different extraction strategy.
-
-**p1040** — The tax table is rendered as plain text across 12 pages in a three-column layout. Each line contains up to three income bands packed together (e.g., `3,000 3,050 303 303 303 303  6,000 6,050 603 ...`). The extractor uses regex to find numeric sequences and a sliding window to identify valid income bands by checking that the bracket width is in `{5, 10, 25, 50}` and that bounds are multiples of 5. A `seen_bands` set prevents duplicates from the overlapping multi-column layout.
-
-**p596** — The EIC table has a proper table structure that pdfplumber's `extract_tables()` can parse directly. Each row contains an income range in column 0, single/MFS/HH credit amounts for 0–3 children in column 2, and MFJ credits in column 3. Some cells pack multiple rows with newlines (e.g., `200 250\n250 300\n...`), which are split and processed individually.
-
-**p15t** — The wage bracket tables are plain text pages identified by the header `Wage Bracket Method Tables` + `2020 or Later`. Each data line has exactly 8 space-separated tokens: `$from $to amount×6` (one per filing status × withholding type combination). The six amounts map to a fixed column order defined in `S2_COLUMNS`.
-
-All five PDFs are parsed in parallel using `ThreadPoolExecutor(max_workers=5)` — one thread per file — coordinated via `asyncio.run_in_executor`. The pipeline is idempotent: on startup it checks for existing records before running.
-
-## Design decisions
-
-**pdfplumber for PDF extraction**
-
-All five PDFs contain embedded text (not scanned images), which makes pdfplumber's extraction reliable. It handles both cases present in these documents: `extract_tables()` for p596 (proper table structure) and `extract_text()` for p1040 and p15t (plain text columns).
-
-**Deterministic parsing over LLM extraction**
-
-Tax amounts must be exact. A parsing error of $1 produces a wrong tax figure. The PDFs contain embedded text (not scanned images), so the layout is machine-readable and the extraction can be fully deterministic, tested, and audited. LLM-based extraction adds latency, cost, and non-determinism to a problem that doesn't require semantic understanding — just pattern matching on well-structured numeric data. IRS table patterns were identified in collaboration with an LLM tool, which accelerated extraction logic design while keeping the final implementation fully deterministic.
-
-**Parallel processing and bottleneck reduction**
-
-Async patterns are used throughout the stack to avoid blocking the event loop at every I/O boundary: FastAPI async handlers, SQLAlchemy async + asyncpg for non-blocking DB queries, and `asyncio.to_thread` for the agent's synchronous tool calling loop. For the PDF pipeline, pdfplumber is synchronous and CPU/IO-bound — parsing five files sequentially would make startup time additive. `ThreadPoolExecutor(max_workers=5)` dispatches one thread per file and `asyncio.gather` collects all results concurrently, reducing total parse time to approximately the slowest single file.
-
-**Two tables instead of one**
-
-`tax_records` merges p1040 and p596 rows because both share the same dimensional shape: year, filing status, income range, and a dollar amount. The `table_type` column (`tax_table` / `eic`) and `qualifying_children` distinguish them. Splitting them into separate tables would duplicate the schema with no query benefit.
-
-`withholding_brackets` is a separate table because it has attributes that don't exist in the income tax domain (`pay_period`, `withholding_type`) and its income bounds are decimal rather than integer. Forcing it into `tax_records` would require nullable columns with no semantic meaning for the other rows.
+---
 
 ## Architecture notes
 
+**Two database sessions**
+
+The static GET endpoints and the agent use `DATABASE_URL_READONLY` (a PostgreSQL user with `SELECT`-only privileges). The dynamic PDF endpoints use `get_write_db`, which connects via the admin `DATABASE_URL` since they need to `INSERT` and `DELETE`. The admin connection is also used at startup for schema creation and pipeline ingestion.
+
 **Async event loop and the agent thread**
 
-FastAPI runs on a single asyncio event loop. The agent's tool calling loop (`_run_sync`) runs in a worker thread via `asyncio.to_thread`, which means it cannot directly `await` coroutines. The SQL queries in `agent_tools.py` are async (SQLAlchemy async). To bridge this, `setup_loop()` captures the main event loop at startup, and `run_sql_query` uses `asyncio.run_coroutine_threadsafe` to submit the async query back onto the main loop from the worker thread and block until it resolves.
-
-**Readonly database user**
-
-The GET endpoints and the agent both use `DATABASE_URL_READONLY` (a PostgreSQL user with `SELECT`-only privileges). The admin connection (`DATABASE_URL`) is only used at startup for schema creation and pipeline ingestion. An additional `SELECT`-only guard is enforced in code in `agent_tools.py` before any query reaches the database.
+FastAPI runs on a single asyncio event loop. The agent's tool calling loop (`_run_sync`) runs in a worker thread via `asyncio.to_thread`. The SQL queries in `agent_tools.py` are async. To bridge this, `setup_loop()` captures the main event loop at startup, and `run_sql_query` uses `asyncio.run_coroutine_threadsafe` to submit the async query back onto the main loop from the worker thread and block until it resolves.
 
 **Rate limiting**
 
-`slowapi` applies per-IP rate limits: 100 req/min on the three GET endpoints, 20 req/min on the agent endpoint.
+`slowapi` applies per-IP rate limits: 100 req/min on the static GET endpoints, 20 req/min on the agent, 5 req/min on `POST /upload-pdfs`, 30 req/min on dynamic GET endpoints, 10 req/min on `DELETE`.
+
+---
 
 ## API reference
 
@@ -121,10 +165,85 @@ Interactive docs available at `/docs` on the running service.
 
 ---
 
-### `GET /tax-records`
-Returns the federal income tax bracket for a given income and filing status (p1040, 2025).
+### `POST /upload-pdfs`
+Uploads a PDF and runs the AI extraction pipeline. Returns the `pdf_hash` (first 12 chars), detected tables, and record counts.
+
+- Max file size: 10 MB
+- Max documents: 5 (use `DELETE` to free a slot)
+- Duplicate PDFs are rejected by content hash regardless of filename
+
+**Response:**
+```json
+{
+  "pdf_hash": "895ca7f65d41",
+  "filename": "tablas_impuestos_federales_2026.pdf",
+  "pages_with_tables": [2, 3, 4, 5, 6, 7],
+  "tables": [
+    {"table_type": "federal_income_tax_brackets_single_filers_2026", "page": 2, "records_stored": 7, "sample": {...}}
+  ],
+  "total_records": 48
+}
+```
+
+---
+
+### `GET /dynamic-pdfs`
+Lists all uploaded PDFs with slot usage, record counts, and hashes.
+
+**Response:**
+```json
+{
+  "slots_used": "1/5",
+  "pdfs": [
+    {
+      "pdf_hash": "895ca7f65d41",
+      "filename": "tablas_impuestos_federales_2026.pdf",
+      "document_type": "tablas_impuestos_federales_2026",
+      "uploaded_at": "2026-05-19T17:35:59Z",
+      "record_count": 48
+    }
+  ]
+}
+```
+
+---
+
+### `GET /dynamic-pdfs/{pdf_hash}/records`
+Returns all extracted records for a PDF, grouped by `table_type` and ordered by page number. Use the first 12 characters of the hash returned by `POST /upload-pdfs`.
+
+**Response:**
+```json
+{
+  "pdf_hash": "895ca7f65d41",
+  "filename": "tablas_impuestos_federales_2026.pdf",
+  "document_type": "tablas_impuestos_federales_2026",
+  "tables": {
+    "federal_income_tax_brackets_single_filers_2026": [
+      {"lower_limit": 0, "upper_limit": 11925, "marginal_rate": 10, "base_calculation": "10% del ingreso gravable"},
+      ...
+    ]
+  }
+}
+```
+
+---
+
+### `DELETE /dynamic-pdfs/{pdf_hash}`
+Deletes a PDF and all its records, freeing a slot.
 
 **Query params:**
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `key` | `string` | Authorization key — required |
+| `pdf_hash` | `string` | First 12 chars of the hash |
+
+Returns `401` if the key is wrong, `404` if the hash is not found.
+
+---
+
+### `GET /tax-records`
+Returns the federal income tax bracket for a given income and filing status (p1040, 2025).
 
 | Param | Type | Values |
 |-------|------|--------|
@@ -144,8 +263,6 @@ GET /tax-records?income=50000&filing_status=single
 
 ### `GET /eic-credits`
 Returns the Earned Income Credit for a given income, filing status, and number of qualifying children (p596, 2024–2025).
-
-**Query params:**
 
 | Param | Type | Values |
 |-------|------|--------|
@@ -167,8 +284,6 @@ GET /eic-credits?income=20000&filing_status=single_mfs_hh&qualifying_children=2&
 ### `GET /withholding-brackets`
 Returns the wage withholding amount for a given pay period income (p15t, 2025–2026).
 
-**Query params:**
-
 | Param | Type | Values |
 |-------|------|--------|
 | `income` | `float` | ≥ 0 |
@@ -179,18 +294,10 @@ Returns the wage withholding amount for a given pay period income (p15t, 2025–
 
 Returns `[]` when income exceeds the table maximum — use the IRS percentage method (Pub. 15-T) in that case.
 
-**Example:**
-```
-GET /withholding-brackets?income=1000&filing_status=Single+or+Married+Filing+Separately&pay_period=WEEKLY&withholding_type=standard&year=2025
-```
-```json
-[{"year": 2025, "filing_status": "Single or Married Filing Separately", "pay_period": "WEEKLY", "income_from": 995.0, "income_to": 1005.0, "withholding_amount": 81.0, "withholding_type": "standard"}]
-```
-
 ---
 
 ### `POST /agent`
-Accepts a natural language tax question and returns an answer backed by SQL queries against the database.
+Accepts a natural language tax question and returns an answer backed by SQL queries against the static database.
 
 **Request body:**
 ```json
@@ -202,12 +309,12 @@ Accepts a natural language tax question and returns an answer backed by SQL quer
 {"answer": "A single filer owes **$5,165.00** in federal income tax on **$45,000** of income for **2025**."}
 ```
 
-The agent uses the OpenAI tool calling API (Azure AI Foundry, deployment configured via `AZURE_MODEL_DEPLOYMENT`). It has one tool: `run_sql_query`, which executes read-only SELECT statements. The system prompt includes the full database schema, column semantics, and example queries so the model generates correct SQL without hallucinating table or column names.
+The agent uses the OpenAI tool calling API (Azure AI Foundry). It has one tool: `run_sql_query`, which executes read-only SELECT statements. A `SELECT`-only guard is enforced in code before any query reaches the database.
 
 ---
 
 ### `GET /stats`
-Returns total record counts and per-year breakdown for each table.
+Returns total record counts and per-year breakdown for each static table.
 
 ### `GET /health`
 Returns `{"status": "ok"}`.
@@ -234,12 +341,12 @@ AZURE_MODEL_DEPLOYMENT=<azure_model_deployment_name>
 AZURE_AI_API_KEY=<azure_api_key>
 ```
 
-Run the API (the pipeline runs automatically on first startup):
+Run the API (the static pipeline runs automatically on first startup):
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Run tests (requires a fully configured environment with database connection, loaded data, and PDF source files in place):
+Run tests:
 ```bash
 pytest
 ```
